@@ -31,6 +31,7 @@ interface PlannerProps {
 
 export default function Planner({ tasks, addTask, addTasks, toggleTask, removeTask, clearAllTasks }: PlannerProps) {
   const [newTask, setNewTask] = useState('');
+  const [newTaskHours, setNewTaskHours] = useState(1);
   const [selectedDay, setSelectedDay] = useState('Segunda');
   const [activeTab, setActiveTab] = useState<'semana' | 'rotina'>('semana');
   const [message, setMessage] = useState('');
@@ -39,6 +40,10 @@ export default function Planner({ tasks, addTask, addTasks, toggleTask, removeTa
   const [clearing, setClearing] = useState(false);
 
   const [subjects, setSubjects] = useState([{ id: '1', name: '', hours: 1 }]);
+  const [freeDays, setFreeDays] = useState<string[]>([]);
+
+  const toggleFreeDay = (day: string) =>
+    setFreeDays(prev => prev.includes(day) ? prev.filter(d => d !== day) : [...prev, day]);
 
   const safeTasks = Array.isArray(tasks) ? tasks : [];
   const totalTasks = safeTasks.length;
@@ -52,8 +57,34 @@ export default function Planner({ tasks, addTask, addTasks, toggleTask, removeTa
       return;
     }
     setSaving(true);
-    await addTask(newTask.trim(), selectedDay);
+    const taskName = newTask.trim().toLowerCase().startsWith('estudar')
+      ? newTask.trim()
+      : `Estudar ${newTask.trim()}`;
+    if (newTaskHours <= MAX_HOURS_PER_SESSION) {
+      // Single task
+      const label = `${taskName} (${newTaskHours}h)`;
+      await addTask(label, selectedDay);
+    } else {
+      // Distribute across days
+      const studyDays = ['Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado', 'Domingo'];
+      const startIndex = studyDays.indexOf(selectedDay);
+      const newTasks: Omit<Task, 'id'>[] = [];
+      let remaining = newTaskHours;
+      let offset = startIndex >= 0 ? startIndex : 0;
+      while (remaining > 0) {
+        const sessionHours = Math.min(remaining, MAX_HOURS_PER_SESSION);
+        newTasks.push({
+          title: `${taskName} (${sessionHours}h)`,
+          day: studyDays[offset % studyDays.length],
+          completed: false,
+        });
+        remaining -= sessionHours;
+        offset++;
+      }
+      await addTasks(newTasks);
+    }
     setNewTask('');
+    setNewTaskHours(1);
     setMessage('');
     setSaving(false);
   };
@@ -70,6 +101,8 @@ export default function Planner({ tasks, addTask, addTasks, toggleTask, removeTa
     setSubjects(subjects.map(s => s.id === id ? { ...s, [field]: value } : s));
   const removeSubject = (id: string) => setSubjects(subjects.filter(s => s.id !== id));
 
+  const MAX_HOURS_PER_SESSION = 2;
+
   const generateRoutine = async () => {
     const validSubjects = subjects.filter(s => s.name.trim() !== '');
     if (validSubjects.length === 0) {
@@ -77,14 +110,54 @@ export default function Planner({ tasks, addTask, addTasks, toggleTask, removeTa
       setTimeout(() => setMessage(''), 3000);
       return;
     }
+
     const newTasks: Omit<Task, 'id'>[] = [];
-    const studyDays = ['Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta'];
-    validSubjects.forEach((sub, index) => {
-      const primaryDay = studyDays[index % studyDays.length];
-      const reviewDay = studyDays[(index + 2) % studyDays.length];
-      newTasks.push({ title: `Estudar ${sub.name} (${sub.hours}h)`, day: primaryDay, completed: false });
-      newTasks.push({ title: `Revisar ${sub.name}`, day: reviewDay, completed: false });
+    const allDays = ['Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado', 'Domingo'];
+    const studyDays = allDays.filter(d => !freeDays.includes(d));
+    if (studyDays.length === 0) {
+      setMessage('Selecione pelo menos um dia disponível para estudar.');
+      setTimeout(() => setMessage(''), 3000);
+      return;
+    }
+
+    // Track how many sessions each day already received to spread load evenly
+    const dayLoad: Record<string, number> = {};
+    studyDays.forEach(d => (dayLoad[d] = 0));
+
+    validSubjects.forEach((sub, subIndex) => {
+      let remainingHours = sub.hours;
+      // Start from a different day offset per subject to avoid clustering
+      let dayOffset = subIndex % studyDays.length;
+
+      while (remainingHours > 0) {
+        // Pick the day with least load, starting from dayOffset
+        let chosenDay = studyDays[dayOffset % studyDays.length];
+        // Find the least-loaded day from dayOffset onward
+        let minLoad = Infinity;
+        for (let i = 0; i < studyDays.length; i++) {
+          const candidate = studyDays[(dayOffset + i) % studyDays.length];
+          if (dayLoad[candidate] < minLoad) {
+            minLoad = dayLoad[candidate];
+            chosenDay = candidate;
+          }
+        }
+
+        const sessionHours = Math.min(remainingHours, MAX_HOURS_PER_SESSION);
+        newTasks.push({
+          title: `Estudar ${sub.name} (${sessionHours}h)`,
+          day: chosenDay,
+          completed: false,
+        });
+        dayLoad[chosenDay] += sessionHours;
+        remainingHours -= sessionHours;
+        dayOffset = (studyDays.indexOf(chosenDay) + 1) % studyDays.length;
+      }
+
+      // Add a review session on a different day
+      const reviewDayIndex = (studyDays.indexOf(newTasks.find(t => t.title.startsWith(`Estudar ${sub.name}`))?.day ?? studyDays[0]) + 2) % studyDays.length;
+      newTasks.push({ title: `Revisar ${sub.name}`, day: studyDays[reviewDayIndex], completed: false });
     });
+
     setSaving(true);
     await addTasks(newTasks);
     setSaving(false);
@@ -140,6 +213,18 @@ export default function Planner({ tasks, addTask, addTasks, toggleTask, removeTa
                 placeholder="O que você precisa estudar?"
                 className="flex-1 bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all text-sm"
               />
+              <div className="flex items-center gap-2 bg-gray-50 border border-gray-200 rounded-xl px-3 py-2">
+                <input
+                  type="number"
+                  min="1"
+                  max="20"
+                  value={newTaskHours}
+                  onChange={e => setNewTaskHours(parseInt(e.target.value) || 1)}
+                  className="w-12 bg-transparent focus:outline-none text-center text-sm font-semibold text-gray-700"
+                  title="Horas de estudo"
+                />
+                <span className="text-gray-400 text-sm font-medium">h</span>
+              </div>
               <select
                 value={selectedDay}
                 onChange={e => setSelectedDay(e.target.value)}
@@ -151,10 +236,16 @@ export default function Planner({ tasks, addTask, addTasks, toggleTask, removeTa
                 type="submit"
                 disabled={saving}
                 className="bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white px-6 py-3 rounded-xl font-semibold flex items-center justify-center gap-2 transition-all shadow-sm hover:shadow-blue-500/20 text-sm"
+                title={newTaskHours > MAX_HOURS_PER_SESSION ? `Será distribuído em ${Math.ceil(newTaskHours / MAX_HOURS_PER_SESSION)} dias` : ''}
               >
                 {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <><Plus className="w-4 h-4" /> Adicionar</>}
               </button>
             </form>
+            {newTaskHours > MAX_HOURS_PER_SESSION && (
+              <p className="mt-2 text-xs text-blue-500 font-medium">
+                ⚡ {newTaskHours}h serão divididas em {Math.ceil(newTaskHours / MAX_HOURS_PER_SESSION)} sessões de até 2h, a partir de <strong>{selectedDay}</strong>.
+              </p>
+            )}
           </div>
 
           {/* Day columns */}
@@ -298,6 +389,32 @@ export default function Planner({ tasks, addTask, addTasks, toggleTask, removeTa
                   </button>
                 </div>
               ))}
+            </div>
+
+            {/* Free days selector */}
+            <div className="mb-8 p-5 bg-gray-50 rounded-2xl border border-gray-200">
+              <p className="text-sm font-semibold text-gray-700 mb-3">📅 Dias livres (sem estudo)</p>
+              <div className="flex flex-wrap gap-2">
+                {['Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado', 'Domingo'].map(day => (
+                  <button
+                    key={day}
+                    type="button"
+                    onClick={() => toggleFreeDay(day)}
+                    className={`px-4 py-2 rounded-xl text-sm font-medium transition-all border-2 ${
+                      freeDays.includes(day)
+                        ? 'bg-red-100 border-red-300 text-red-700 line-through opacity-70'
+                        : 'bg-white border-gray-200 text-gray-700 hover:border-purple-400 hover:bg-purple-50 hover:text-purple-700'
+                    }`}
+                  >
+                    {day}
+                  </button>
+                ))}
+              </div>
+              {freeDays.length > 0 && (
+                <p className="mt-2 text-xs text-red-500">
+                  {freeDays.join(', ')} {freeDays.length === 1 ? 'não terá' : 'não terão'} sessões de estudo.
+                </p>
+              )}
             </div>
 
             <div className="flex flex-col sm:flex-row gap-3 justify-center">

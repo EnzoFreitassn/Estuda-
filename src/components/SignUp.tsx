@@ -18,12 +18,16 @@ export default function SignUp({ onSwitchToLogin }: { onSwitchToLogin: () => voi
     if (password.length < 6) { setError('A senha deve ter pelo menos 6 caracteres.'); return; }
     if (password !== confirm) { setError('As senhas não coincidem.'); return; }
     setLoading(true);
-    const { error } = await supabase.auth.signUp({ email, password });
+    const { data, error } = await supabase.auth.signUp({ email, password });
     if (error) {
       setError(error.message === 'User already registered'
         ? 'Este e-mail já está cadastrado. Faça login.'
         : 'Erro ao criar conta. Tente novamente.');
+    } else if (data.session) {
+      // Email confirmation is OFF — user is logged in automatically
+      // useAuth hook will detect the session and redirect to app
     } else {
+      // Email confirmation is ON — show success screen
       setSuccess(true);
     }
     setLoading(false);
